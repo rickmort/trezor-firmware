@@ -89,14 +89,15 @@ class BasicApprover(Approver):
 
         total = self.total_in - self.change_out
         spending = total - self.external_in
-        # fee_threshold = (coin.maxfee per byte * tx size)
-        fee_threshold = (self.coin.maxfee_kb / 1000) * (self.weight.get_total() / 4)
 
-        # fee > (coin.maxfee per byte * tx size)
-        if fee > fee_threshold:
-            if fee > 10 * fee_threshold and not device.unsafe_prompts_allowed():
-                raise wire.DataError("The fee is unexpectedly large")
-            await helpers.confirm_feeoverthreshold(fee, self.coin)
+        # Decred tickets will not meet the fee requirement. The fee for decred
+        # is checked later.
+        if self.coin.decred:
+            maybeTicketInputs = self.tx.inputs_count in (1, 2)
+            maybeTicketOutputs = self.tx.outputs_count in (3, 5)
+            maybeTicket = maybeTicketInputs and maybeTicketOutputs
+        if not maybeTicket:
+            await self.approve_fee()
         if self.change_count > self.MAX_SILENT_CHANGE_COUNT:
             await helpers.confirm_change_count_over_threshold(self.change_count)
         if self.tx.lock_time > 0:
@@ -105,6 +106,18 @@ class BasicApprover(Approver):
             await helpers.confirm_total(total, fee, self.coin)
         else:
             await helpers.confirm_joint_total(spending, total, self.coin)
+
+    async def approve_fee(self) -> None:
+        fee = self.total_in - self.total_out
+
+        # fee_threshold = (coin.maxfee per byte * tx size)
+        fee_threshold = (self.coin.maxfee_kb / 1000) * (self.weight.get_total() / 4)
+
+        # fee > (coin.maxfee per byte * tx size)
+        if fee > fee_threshold and not self.coin.decred:
+            if fee > 10 * fee_threshold and not device.unsafe_prompts_allowed():
+                raise wire.DataError("The fee is unexpectedly large")
+            await helpers.confirm_feeoverthreshold(fee, self.coin)
 
 
 class CoinJoinApprover(Approver):

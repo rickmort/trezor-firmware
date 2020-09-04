@@ -1,5 +1,6 @@
 from trezor import utils, wire
 from trezor.crypto import base58, cashaddr
+from trezor.crypto.base58 import blake256d_32
 from trezor.crypto.hashlib import sha256
 from trezor.messages import InputScriptType
 from trezor.messages.MultisigRedeemScriptType import MultisigRedeemScriptType
@@ -573,3 +574,39 @@ def append_signature(w: Writer, signature: bytes, hash_type: int) -> None:
 def append_pubkey(w: Writer, pubkey: bytes) -> None:
     write_op_push(w, len(pubkey))
     write_bytes_unchecked(w, pubkey)
+
+
+# Decred specific
+# ===
+
+
+def output_script_sstxsubmission(addr: str) -> bytearray:
+    try:
+        raw_address = base58.decode_check(addr, blake256d_32)
+    except ValueError:
+        raise wire.DataError("Invalid address")
+    w = empty_bytearray(26)
+    w.append(0xba)  # OP_SSTX
+    w.append(0x76)  # OP_DUP
+    w.append(0xa9)  # OP_HASH160
+    w.append(0x14)  # OP_DATA_20
+    w.extend(raw_address[2:])
+    w.append(0x88)  # OP_EQUALVERIFY
+    w.append(0xac)  # OP_CHECKSIG
+    return w
+
+
+def output_script_sstxchange(addr: str) -> bytearray:
+    try:
+        raw_address = base58.decode_check(addr, blake256d_32)
+    except ValueError:
+        raise wire.DataError("Invalid address")
+    w = empty_bytearray(26)
+    w.append(0xbd)  # OP_SSTX
+    w.append(0x76)  # OP_DUP
+    w.append(0xa9)  # OP_HASH160
+    w.append(0x14)  # OP_DATA_20
+    w.extend(raw_address[2:])
+    w.append(0x88)  # OP_EQUALVERIFY
+    w.append(0xac)  # OP_CHECKSIG
+    return w

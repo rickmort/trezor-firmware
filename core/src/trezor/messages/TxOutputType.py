@@ -8,7 +8,7 @@ if __debug__:
     try:
         from typing import Dict, List  # noqa: F401
         from typing_extensions import Literal  # noqa: F401
-        EnumTypeOutputScriptType = Literal[0, 1, 2, 3, 4, 5]
+        EnumTypeOutputScriptType = Literal[0, 1, 2, 3, 4, 5, 6, 7]
     except ImportError:
         pass
 
@@ -37,7 +37,7 @@ class TxOutputType(p.MessageType):
             1: ('address', p.UnicodeType, 0),
             2: ('address_n', p.UVarintType, p.FLAG_REPEATED),
             3: ('amount', p.UVarintType, 0),  # required
-            4: ('script_type', p.EnumType("OutputScriptType", (0, 1, 2, 3, 4, 5)), 0),  # required
+            4: ('script_type', p.EnumType("OutputScriptType", (0, 1, 2, 3, 4, 5, 6, 7)), 0),  # required
             5: ('multisig', MultisigRedeemScriptType, 0),
             6: ('op_return_data', p.BytesType, 0),
         }

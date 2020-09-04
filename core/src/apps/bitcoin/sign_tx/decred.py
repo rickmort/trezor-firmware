@@ -2,7 +2,7 @@ from micropython import const
 
 from trezor import wire
 from trezor.crypto.hashlib import blake256
-from trezor.messages import InputScriptType
+from trezor.messages import InputScriptType, OutputScriptType
 from trezor.messages.SignTx import SignTx
 from trezor.messages.TransactionType import TransactionType
 from trezor.messages.TxInputType import TxInputType
@@ -13,7 +13,7 @@ from trezor.utils import HashWriter, ensure
 from apps.common import coininfo, seed
 from apps.common.writers import write_bitcoin_varint
 
-from .. import multisig, scripts, writers
+from .. import addresses, common, multisig, scripts, writers
 from ..common import ecdsa_hash_pubkey, ecdsa_sign
 from . import approvers, helpers, progress
 from .bitcoin import Bitcoin
@@ -56,7 +56,14 @@ class Decred(Bitcoin):
     async def step2_approve_outputs(self) -> None:
         write_bitcoin_varint(self.serialized_tx, self.tx.outputs_count)
         write_bitcoin_varint(self.h_prefix, self.tx.outputs_count)
-        await super().step2_approve_outputs()
+        for i in range(self.tx.outputs_count):
+            # STAGE_REQUEST_3_OUTPUT in legacy
+            txo = await helpers.request_tx_output(self.tx_req, i, self.coin)
+            script_pubkey = self.output_derive_script(txo)
+            await self.approve_output(txo, script_pubkey)
+            # We can finally check the fee if this is not a ticket.
+            if i == 0 and txo.script_type != OutputScriptType.SSTXSUBMISSION:
+                await self.approver.approve_fee()
         self.write_tx_footer(self.serialized_tx, self.tx)
         self.write_tx_footer(self.h_prefix, self.tx)
 
@@ -70,8 +77,20 @@ class Decred(Bitcoin):
         raise wire.DataError("External inputs not supported")
 
     async def approve_output(self, txo: TxOutputType, script_pubkey: bytes) -> None:
-        await super().approve_output(txo, script_pubkey)
+        if self.output_is_change(txo):
+            # output is change and does not need approval
+            self.approver.add_change_output(txo, script_pubkey)
+        else:
+            await self.approver.add_external_output(txo, script_pubkey)
+
+        self.write_tx_output(self.h_approved, txo, script_pubkey)
+        self.hash143_add_output(txo, script_pubkey)
         self.write_tx_output(self.serialized_tx, txo, script_pubkey)
+
+    def output_is_change(self, txo: TxOutputType) -> bool:
+        if txo.script_type == OutputScriptType.SSTXCHANGE:
+            return True
+        return super().output_is_change(txo)
 
     async def step4_serialize_inputs(self) -> None:
         write_bitcoin_varint(self.serialized_tx, self.tx.inputs_count)
@@ -198,3 +217,26 @@ class Decred(Bitcoin):
         writers.write_uint32(w, 0)  # block height fraud proof
         writers.write_uint32(w, 0xFFFFFFFF)  # block index fraud proof
         writers.write_bytes_prefixed(w, script_sig)
+
+    def output_derive_script(self, txo: TxOutputType) -> bytes:
+        if txo.script_type == OutputScriptType.PAYTOOPRETURN:
+            return scripts.output_script_paytoopreturn(txo.op_return_data)
+        elif txo.script_type == OutputScriptType.SSTXSUBMISSION:
+            return scripts.output_script_sstxsubmission(txo.address)
+        elif txo.script_type == OutputScriptType.SSTXCHANGE:
+            return scripts.output_script_sstxchange(txo.address)
+
+        if txo.address_n:
+            # change output
+            try:
+                input_script_type = common.CHANGE_OUTPUT_TO_INPUT_SCRIPT_TYPES[
+                    txo.script_type
+                ]
+            except KeyError:
+                raise wire.DataError("Invalid script type")
+            node = self.keychain.derive(txo.address_n)
+            txo.address = addresses.get_address(
+                input_script_type, self.coin, node, txo.multisig
+            )
+
+        return scripts.output_derive_script(txo.address, self.coin)
