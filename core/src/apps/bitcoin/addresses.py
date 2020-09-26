@@ -24,10 +24,12 @@ def get_address(
     multisig: MultisigRedeemScriptType = None,
 ) -> str:
 
-    if (
-        script_type == InputScriptType.SPENDADDRESS
-        or script_type == InputScriptType.SPENDMULTISIG
-    ):
+    if script_type in [
+        InputScriptType.SPENDADDRESS,
+        InputScriptType.SPENDMULTISIG,
+        InputScriptType.SPENDSSRTX,
+        InputScriptType.SPENDSSGEN,
+    ]:
         if multisig:  # p2sh multisig
             pubkey = node.public_key()
             index = multisig_pubkey_index(multisig, pubkey)
@@ -219,7 +221,11 @@ def validate_purpose_against_script_type(
     - 49 for p2wsh-nested-in-p2sh spend (script_type == SPENDP2SHWITNESS)
     - 84 for p2wsh native segwit spend (script_type == SPENDWITNESS)
     """
-    if purpose == 44 | HARDENED and script_type != InputScriptType.SPENDADDRESS:
+    if purpose == 44 | HARDENED and script_type not in [
+        InputScriptType.SPENDADDRESS,
+        InputScriptType.SPENDSSRTX,
+        InputScriptType.SPENDSSGEN,
+    ]:
         return False
     if purpose == 45 | HARDENED and script_type != InputScriptType.SPENDMULTISIG:
         return False

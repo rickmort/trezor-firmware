@@ -2,13 +2,14 @@ from micropython import const
 
 from trezor import wire
 from trezor.crypto.hashlib import blake256
-from trezor.messages import InputScriptType
+from trezor.messages import InputScriptType, OutputScriptType
 from trezor.messages.PrevOutput import PrevOutput
+from trezor.messages.SignTx import SignTx
 from trezor.utils import HashWriter, ensure
 
 from apps.common.writers import write_bitcoin_varint
 
-from .. import multisig, scripts, writers
+from .. import addresses, common, multisig, scripts, writers
 from ..common import ecdsa_hash_pubkey, ecdsa_sign
 from . import approvers, helpers, progress
 from .bitcoin import Bitcoin
@@ -23,7 +24,6 @@ DECRED_SIGHASH_ALL = const(1)
 if False:
     from typing import Union
 
-    from trezor.messages.SignTx import SignTx
     from trezor.messages.TxInput import TxInput
     from trezor.messages.TxOutput import TxOutput
     from trezor.messages.PrevTx import PrevTx
@@ -60,7 +60,11 @@ class Decred(Bitcoin):
     async def step2_approve_outputs(self) -> None:
         write_bitcoin_varint(self.serialized_tx, self.tx.outputs_count)
         write_bitcoin_varint(self.h_prefix, self.tx.outputs_count)
-        await super().step2_approve_outputs()
+        for i in range(self.tx.outputs_count):
+            # STAGE_REQUEST_3_OUTPUT in legacy
+            txo = await helpers.request_tx_output(self.tx_req, i, self.coin)
+            script_pubkey = self.output_derive_script(txo)
+            await self.approve_output(txo, script_pubkey)
         self.write_tx_footer(self.serialized_tx, self.tx)
         self.write_tx_footer(self.h_prefix, self.tx)
 
@@ -74,8 +78,20 @@ class Decred(Bitcoin):
         raise wire.DataError("External inputs not supported")
 
     async def approve_output(self, txo: TxOutput, script_pubkey: bytes) -> None:
-        await super().approve_output(txo, script_pubkey)
+        if self.output_is_change(txo):
+            # output is change and does not need approval
+            self.approver.add_change_output(txo, script_pubkey)
+        else:
+            await self.approver.add_external_output(txo, script_pubkey)
+
+        self.write_tx_output(self.h_approved, txo, script_pubkey)
+        self.hash143_add_output(txo, script_pubkey)
         self.write_tx_output(self.serialized_tx, txo, script_pubkey)
+
+    def output_is_change(self, txo: TxOutput) -> bool:
+        if txo.script_type == OutputScriptType.SSTXCHANGE:
+            return True
+        return super().output_is_change(txo)
 
     async def step4_serialize_inputs(self) -> None:
         write_bitcoin_varint(self.serialized_tx, self.tx.inputs_count)
@@ -101,6 +117,14 @@ class Decred(Bitcoin):
                 )
             elif txi_sign.script_type == InputScriptType.SPENDADDRESS:
                 prev_pkscript = scripts.output_script_p2pkh(
+                    ecdsa_hash_pubkey(key_sign_pub, self.coin)
+                )
+            elif txi_sign.script_type == InputScriptType.SPENDSSRTX:
+                prev_pkscript = scripts.input_script_ssrtx(
+                    ecdsa_hash_pubkey(key_sign_pub, self.coin)
+                )
+            elif txi_sign.script_type == InputScriptType.SPENDSSGEN:
+                prev_pkscript = scripts.input_script_ssgen(
                     ecdsa_hash_pubkey(key_sign_pub, self.coin)
                 )
             else:
@@ -198,3 +222,37 @@ class Decred(Bitcoin):
         writers.write_uint32(w, 0)  # block height fraud proof
         writers.write_uint32(w, 0xFFFFFFFF)  # block index fraud proof
         writers.write_bytes_prefixed(w, script_sig)
+
+    def output_derive_script(self, txo: TxOutput) -> bytes:
+        if txo.script_type == OutputScriptType.PAYTOOPRETURN:
+            assert txo.op_return_data is not None  # checked in sanitize_tx_output
+            return scripts.output_script_paytoopreturn(txo.op_return_data)
+        elif txo.script_type == OutputScriptType.SSTXSUBMISSIONPKH:
+            assert txo.address is not None  # checked in sanitize_tx_output
+            return scripts.output_script_sstxsubmissionpkh(txo.address)
+        elif txo.script_type == OutputScriptType.SSTXSUBMISSIONSH:
+            assert txo.address is not None  # checked in sanitize_tx_output
+            return scripts.output_script_sstxsubmissionsh(txo.address)
+        elif txo.script_type == OutputScriptType.SSTXCHANGE:
+            assert txo.address is not None  # checked in sanitize_tx_output
+            # Change addresses are not currently used. Inputs should be exact.
+            if txo.amount != 0:
+                raise wire.DataError("Only value of 0 allowed for sstx change")
+            return scripts.output_script_sstxchange(txo.address)
+
+        if txo.address_n:
+            # change output
+            try:
+                input_script_type = common.CHANGE_OUTPUT_TO_INPUT_SCRIPT_TYPES[
+                    txo.script_type
+                ]
+            except KeyError:
+                raise wire.DataError("Invalid script type")
+            node = self.keychain.derive(txo.address_n)
+            txo.address = addresses.get_address(
+                input_script_type, self.coin, node, txo.multisig
+            )
+
+        assert txo.address is not None  # checked in sanitize_tx_output
+
+        return scripts.output_derive_script(txo.address, self.coin)
